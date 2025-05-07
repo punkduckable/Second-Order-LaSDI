@@ -6,10 +6,7 @@
 import  os;
 import  sys;
 src_Path        : str   = os.path.dirname(os.path.dirname(__file__));
-LD_Path         : str   = os.path.join(src_Path, "LatentDynamics");
 util_Path       : str   = os.path.join(src_Path, "Utilities");
-sys.path.append(src_Path);
-sys.path.append(LD_Path);
 sys.path.append(util_Path);
 
 import  numpy;
@@ -18,7 +15,8 @@ from    scipy.sparse        import  spdiags;
 import  torch;
 
 from    Physics             import  Physics;
-from    FiniteDifference    import  Derivative1_Order4;
+from    FiniteDifference    import  Derivative1_Order4, Derivative1_Order2_NonUniform;
+from    Burgers             import  solver;
 
 
 
@@ -35,23 +33,22 @@ class Burgers(Physics):
     
     def __init__(self, config : dict, param_names : list[str] = None) -> None:
         """
-        This is the initializer for the Second-Order version of the Burgers Physics class. This 
-        class essentially acts as a wrapper around a 1D Burgers solver with a twist. Specifically,
-        we jerry-rig the solver so that we find the solution and its time derivative at each time 
-        step. In other words, we treat the problem as if it requires two initial conditions (and 
-        has second order time derivatives).
+        This is the initializer for the Burgers Physics class. This class essentially acts as a 
+        wrapper around a 1D Burgers solver.
 
         
         -------------------------------------------------------------------------------------------
         Arguments
         -------------------------------------------------------------------------------------------
 
-        config: A dictionary housing the settings for the Burgers object. This should be the 
-        "physics" sub-dictionary of the configuration file. 
+        config: dict
+            A dictionary housing the settings for the Burgers object. This should be the 
+            "physics" sub-dictionary of the configuration file. 
 
-        param_names: A list of strings. There should be one list item for each parameter. The i'tj
-        element of this list should be a string housing the name of the i'th parameter. For the 
-        Burgers class, this should have two elements: a and w. 
+        param_names: list[str]
+            There should be one list item for each parameter. The i'tj
+            element of this list should be a string housing the name of the i'th parameter. For the 
+            Burgers class, this should have two elements: a and w. 
 
         
         -------------------------------------------------------------------------------------------
@@ -72,9 +69,7 @@ class Burgers(Physics):
                          param_names    = param_names, 
                          Uniform_t_Grid = True);
 
-        # The solution to Burgers' equation is scalar valued, so the qdim is 1. Likewise, since 
-        # there is only one spatial dimension in the 1D burgers example, dim is also 1.
-        self.qdim           : int   = 1;
+        # Since there is only one spatial dimension in the 1D burgers example, dim is also 1.
         self.spatial_dim    : int   = 1;
         
         # Make sure the config dictionary is actually for Burgers' equation.
@@ -108,8 +103,7 @@ class Burgers(Physics):
 
     def initial_condition(self, param : numpy.ndarray) -> list[numpy.ndarray]:
         """
-        Evaluates the initial condition along the spatial grid. For this class, we use the 
-        following initial condition:
+        Evaluates the initial condition at the points in self.X_Positions. In this case,
 
             u(0, x) = a*exp(-x^2 / (2*w^2))
             v(0, x) = (d/dt)u(t, x)|_{t = 0}
@@ -117,28 +111,29 @@ class Burgers(Physics):
         where a and w are the corresponding parameter values. We compute v(0, x) by solving forward
         a few time steps and the computing the time derivative using finite differences.
 
-
+        
         -------------------------------------------------------------------------------------------
         Arguments
         -------------------------------------------------------------------------------------------
 
-        param: A 1d numpy.ndarray object with two elements corresponding to the values of the w 
-        and a parameters. self.a_idx and self.w_idx tell us which index corresponds to which 
-        variable.
+        param: numpy.ndarray, shape = (self.n_p)
+            The two elements correspond to the values of the w and a parameters. self.a_idx and 
+            self.w_idx tell us which index corresponds to which variable.
         
 
         -------------------------------------------------------------------------------------------
         Returns 
         -------------------------------------------------------------------------------------------
 
-        A 2 element list whose i'th element is a 1d numpy.ndarray object whose shape matches that
-        of self.X_Positions whose j'th element holds the i'th derivative of the initial state at 
-        the position self.X_Positions[j] when we use param to define the initial condition 
-        functions.
+        u0 : list[numpy.ndarray], len = 2
+            i'th element is a ndarray with the same shape as self.X_Positions whose j'th element 
+            holds the i'th derivative of the initial state at the position self.X_Positions[j] when 
+            we use param to define the FOM.
         """
 
         # Checks.
         assert(isinstance(param, numpy.ndarray));
+        assert(self.X_Positions is not None);
         assert(len(param.shape) == 1);
         assert(param.shape[0]   == self.n_p);
         
@@ -155,8 +150,13 @@ class Burgers(Physics):
         t_max   : float         = self.config['Burgers']['t_max']; 
         dt      : float         = t_max/(n_t - 1);
 
-        # Solve forward a few time steps.
-        D       : numpy.ndarray         = solver(u0, self.maxk, self.convergence_threshold, 5, self.n_x, dt, self.dx);
+        # Solve forward a few time steps, use that to compute the derivative.
+        t_Grid  : numpy.ndarray         = numpy.linspace(start = 0, stop = 4*dt, num = 5);  # shape (5)
+        D       : numpy.ndarray         = solver(   u0                      = u0, 
+                                                    t_Grid                  = t_Grid, 
+                                                    Dx                      = self.dx, 
+                                                    maxk                    = self.maxk, 
+                                                    convergence_threshold   = self.convergence_threshold);
         V       : numpy.ndarray         = Derivative1_Order4(torch.Tensor(D), h = dt);
         
         # Get the ICs from the solution.
@@ -170,32 +170,32 @@ class Burgers(Physics):
 
     def solve(self, param : numpy.ndarray) -> tuple[list[torch.Tensor], torch.Tensor]:
         """
-        Solves the 1d burgers equation when the IC uses the parameters in the param array.
+        Solves the 1d burgers equation when the FOM is defined using the parameters in param.
 
 
         -------------------------------------------------------------------------------------------
         Arguments
         -------------------------------------------------------------------------------------------
 
-        param: A 1d numpy.ndarray object with two elements corresponding to the values of the w 
-        and a parameters. self.a_idx and self.w_idx tell us which index corresponds to which 
-        variable.
+        param: numpy.ndarray, shape = (2)
+            Holds the values of the w and a parameters. self.a_idx and self.w_idx tell us which 
+            index corresponds to which variable.
         
 
         -------------------------------------------------------------------------------------------
         Returns 
         -------------------------------------------------------------------------------------------
         
-        A two element tuple: X, t_Grid.
+        X, t_Grid
 
-        X is a 2 element list holding the displacement and velocity of the FOM solution when we 
-        use param to define the initial condition function. Each element is a torch.Tensor object 
-        of shape (n_t, self.Frame_Shape), where n_t is the number of time steps when we solve the 
-        FOM using param for the IC parameters.
+        X : list[torch.Tensor], len = 2
+            i'th element has shape = (n_t, self.Frame_Shape), holds the i'th derivative of the FOM 
+            solution when we use param to define the FOM. Specifically, the [j, ...] sub-array of 
+            the returned array holds the i'th derivative of the FOM solution at t_Grid[j].
 
-        t_Grid is a 1d torch.Tensor object whose i'th element holds the i'th time value at which
-        we have an approximation to the FOM solution (the time value associated with X[0][i, ...]
-        and X[1][i, ...]).
+        t_Grid : torch.Tensor, shape = (n_t)
+            i'th element holds the i'th time value at which we have an approximation to the FOM 
+            solution (the time value associated with X[i, ...]).
         """
 
         assert(isinstance(param, numpy.ndarray));
@@ -211,16 +211,24 @@ class Burgers(Physics):
         t_max   : float         = self.config['Burgers']['t_max']; 
         dt      : float         = t_max/(n_t - 1);
         t_Grid  : torch.Tensor  = torch.linspace(0, t_max, n_t, dtype = torch.float32);
-    
-        # Solve the PDE and then reshape the result to be a 3d tensor with a leading dimension of 
-        # size 1.
-        X       : torch.Tensor  = torch.Tensor(solver(u0, self.maxk, self.convergence_threshold, n_t - 1, self.n_x, dt, self.dx));
-        V       : torch.Tensor  = Derivative1_Order4(X, h = dt);
-        
-        X       : torch.Tensor  = X.reshape(n_t, self.n_x);
+        if(self.Uniform_t_Grid == False):
+            r               : float = 0.2*(t_Grid[1] - t_Grid[0]);
+            t_adjustments           = numpy.random.uniform(low = -r, high = r, size = (n_t - 2));
+            t_Grid[1:-1]            = t_Grid[1:-1] + t_adjustments;
+
+
+
+        # Solve the PDE!
+        D       : torch.Tensor  = torch.Tensor(solver(u0 = u0, t_Grid = t_Grid, Dx = self.dx, maxk = self.maxk, convergence_threshold = self.convergence_threshold));
+        if(self.Uniform_t_Grid  == True):
+            V   : torch.Tensor  = Derivative1_Order4(D, h = dt);
+        else:
+            V   : torch.Tensor  = Derivative1_Order2_NonUniform(D, t_Grid = t_Grid);
+
+        D       : torch.Tensor  = D.reshape(n_t, self.n_x);
         V       : torch.Tensor  = V.reshape(n_t, self.n_x);
 
-        new_X   : list[torch.Tensor]    = [X, V];
+        new_X   : list[torch.Tensor]    = [D, V];
 
         # All done!
         return new_X, t_Grid;
@@ -237,20 +245,25 @@ class Burgers(Physics):
         Arguments
         -------------------------------------------------------------------------------------------
 
-        X_hist: A single element list of 2d numpy.ndarray object of shape (n_t, n_x), where n_t is 
-        the number of points along the temporal axis (this is specified by the configuration file) 
-        and n_x is the number of points along the spatial axis. The i,j element of the d'th array 
-        should have the j'th component of the d'th derivative of the fom solution at the i'th time 
-        step.
+        X_hist : list[numpy.ndarray], len = 2
+            d'th element has shape (n_t, n_x), where n_t is the number of points along the 
+            temporal axis (this is specified by the configuration file) and n_x is the number of 
+            points along the spatial axis. The i,j element of the d'th array should hold the j'th 
+            component of the d'th derivative of the FOM solution at the i'th time step.
 
 
         -------------------------------------------------------------------------------------------
         Returns
         -------------------------------------------------------------------------------------------
 
-        A two element tuple. The first is a numpy.ndarray object of shape (n_t - 2, n_x - 2) whose 
-        i, j element holds the residual at the i + 1'th temporal grid point and the j + 1'th 
-        spatial grid point. 
+        r, e
+
+        r : numpy.ndarray, shape = (n_t - 2, n_x - 2)
+            i, j element holds the residual at the i + 1'th temporal grid point and the j + 1'th 
+            spatial grid point. 
+
+        e : float 
+            The norm of r. 
         """
 
         # Run checks.
@@ -282,80 +295,3 @@ class Burgers(Physics):
 
         # All done!
         return r, e;
-
-
-
-# -------------------------------------------------------------------------------------------------
-# Helper functions
-# -------------------------------------------------------------------------------------------------
-
-def residual_burgers(un, uw, c, idxn1):
-
-    '''
-
-    Compute 1D Burgers equation residual for generating the data
-    from https://github.com/LLNL/gLaSDI and https://github.com/LLNL/LaSDI
-
-    '''
-
-    f = c * (uw ** 2 - uw * uw[idxn1]);
-    r = -un + uw + f;
-
-    return r;
-
-
-
-def jacobian(u, c, idxn1, n_x):
-
-    '''
-
-    Compute 1D Burgers equation jacobian for generating the data
-    from https://github.com/LLNL/gLaSDI and https://github.com/LLNL/LaSDI
-
-    '''
-
-    diag_comp           = 1.0 + c * (2 * u - u[idxn1]);
-    subdiag_comp        = numpy.ones(n_x - 1);
-    subdiag_comp[:-1]   = -c * u[1:];
-    data                = numpy.array([diag_comp, subdiag_comp]);
-    J                   = spdiags(data, [0, -1], n_x - 1, n_x - 1, format = 'csr');
-    J[0, -1]            = -c * u[0];
-
-    return J;
-
-
-
-def solver(u0, maxk, convergence_threshold, n_t, n_x, Dt, Dx):
-    '''
-
-    Solves 1D Burgers equation for generating the data
-    from https://github.com/LLNL/gLaSDI and https://github.com/LLNL/LaSDI
-
-    '''
-
-    c = Dt / Dx;
-
-    idxn1       = numpy.zeros(n_x - 1, dtype = 'int');
-    idxn1[1:]   = numpy.arange(n_x - 2);
-    idxn1[0]    = n_x - 2;
-
-    u           = numpy.zeros((n_t + 1, n_x));
-    u[0]        = u0;
-
-    for n in range(n_t):
-        uw = u[n, :-1].copy();
-        r = residual_burgers(u[n, :-1], uw, c, idxn1);
-
-        for k in range(maxk):
-            J = jacobian(uw, c, idxn1, n_x);
-            duw = spsolve(J, -r);
-            uw = uw + duw;
-            r = residual_burgers(u[n, :-1], uw, c, idxn1);
-
-            rel_residual = numpy.linalg.norm(r) / numpy.linalg.norm(u[n, :-1]);
-            if rel_residual < convergence_threshold:
-                u[n + 1, :-1] = uw.copy();
-                u[n + 1, -1] = u[n + 1, 0];
-                break;
-
-    return u;
