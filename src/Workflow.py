@@ -28,6 +28,7 @@ from    GPLaSDI             import  BayesianGLaSDI;
 from    Initialize          import  Initialize_Trainer;
 from    Sample              import  Run_Samples, Update_Train_Space;
 from    Logging             import  Initialize_Logger, Log_Dictionary;
+from    Plot                import  Plot_Heatmap2d;
 
 # Set up the logger.
 Initialize_Logger(level = logging.INFO);
@@ -96,13 +97,13 @@ def main():
         result          = restart_dict['result'];
     else:
         restart_dict    = None;
-        next_step       = NextStep.PickSample;
+        next_step       = NextStep.RunSample;
         result          = Result.Unexecuted;
     
     # Initialize the trainer.
     trainer, param_space, physics, model, latent_dynamics = Initialize_Trainer(config, restart_dict);
 
-    # Run the next step.
+    # Start running steps.
     result, next_step = step(trainer, next_step, config, use_restart);
 
     # Report the result
@@ -113,7 +114,6 @@ def main():
         result = Result.Unexecuted;
     elif (result is Result.Complete):
         LOGGER.info("Workflow is finished.");
-
 
 
     # ---------------------------------------------------------------------------------------------
@@ -143,10 +143,10 @@ def main():
 def step(trainer        : BayesianGLaSDI, 
          next_step      : NextStep, 
          config         : dict, 
-         use_restart    : bool = False):
+         use_restart    : bool = False) -> tuple[Result, NextStep]:
     """
     This function runs the next step of the training procedure. Depending on what we have done, 
-    that next step could be training, picking new samples, generating fom solutions, or 
+    that next step could be training, picking new samples, generating FOM solutions, or 
     collecting samples. 
 
     
@@ -154,15 +154,19 @@ def step(trainer        : BayesianGLaSDI,
     Arguments
     -----------------------------------------------------------------------------------------------
     
-    trainer: A Trainer class object that we use when training the model for a particular instance
-    of the settings.
+    trainer : BayesianGLaSDI
+        A Trainer class object that we use when training the model for a particular instance of 
+        the settings.
 
-    next_step: a NextStep object (a kind of enumeration) specifying what the next step is. 
+    next_step : NextStep
+        specifies what the next step is. 
 
-    config: This should be a dictionary that we loaded from a .yml file. It should house all the 
-    settings we expect to use to generate the data and train the models.
+    config : dict
+        This should be a dictionary that we loaded from a .yml file. It should house all the 
+        settings we expect to use to generate the data and train the models.
 
-    use_restart: a boolean which, if True, will prompt us to return after a single step.
+    use_restart : bool
+         if True, we return after a single step.
 
     
 
@@ -170,7 +174,13 @@ def step(trainer        : BayesianGLaSDI,
     Returns
     -----------------------------------------------------------------------------------------------
 
-    A Returns object (a kind of enumeration) that indicates what happened during the current step.
+    result, next_step
+    
+    result : Result
+        indicates what happened during the current step
+
+    next_step : NextStep
+        Indicates what we should do next. 
     """
 
 
@@ -205,24 +215,16 @@ def step(trainer        : BayesianGLaSDI,
             next_step = NextStep.Train;
 
 
-
     elif (next_step is NextStep.PickSample):
+        # Use greedy sampling to pick that sample. Note that if the training set is empty, this 
+        # function does nothing.
         result, next_step = Update_Train_Space(trainer, config);
 
 
-
     elif (next_step is NextStep.RunSample):
+        # Generate the trajectories for all new testing and training parameters. Append these new
+        # trajectories to trainer's X_Train and X_Test attributes.
         result, next_step = Run_Samples(trainer, config);
-
-
-
-    elif (next_step is NextStep.CollectSample):
-        # Note: We should only reach here if we are using the offline stuff... since I disabled 
-        # that, we should never reach this step.
-        raise RuntimeError("Encountered CollectSample, which is disabled");
-        LOGGER.info("NextStep = Collect_Samples. Has something gone wrong? We should only be here if running offline (which should be disabled).");
-        result, next_step = Collect_Samples(trainer, config);
-
 
 
     else:
@@ -266,32 +268,37 @@ def Save(   param_space         : ParameterSpace,
     Arguments
     -----------------------------------------------------------------------------------------------
 
-    param_space: The parameter space object we use to fetch the training and testing parameter 
-    combinations during training.
+    param_space : ParameterSpace 
+        holds the training and testing parameter combinations.
     
-    physics: The Physics object we use to define the fom model, fetch initial conditions, and 
-    generate fom solutions. We assume that physics, latent_dynamics, and model all have the same 
-    number of initial conditions.
+    physics : Physics
+        defines the FOM model. We can use it to fetch the initial conditions and FOM solution for
+        a particular combination of parameter values. physics, latent_dynamics, and model should 
+        have the same number of initial conditions.
 
-    model: The torch.nn.Module object (autoencoder) we use to map between the FOM and ROM spaces.
-    We assume that physics, latent_dynamics, and model all have the same number of initial 
-    conditions.
+    model : torch.nn.Module
+        maps between the FOM and ROM spaces. physics, latent_dynamics, and model should have the 
+        same number of initial conditions.
 
-    latent_dynamics: the LatentDynamics object we use to define the dynamics in model's latent 
-    space. We assume that physics, latent_dynamics, and model all have the same number of initial 
-    conditions.
+    latent_dynamics : LatentDynamics 
+        defines the dynamics in model's latent space. physics, latent_dynamics, and model should 
+        have the same number of initial conditions.
 
-    trainer: The LaSDI object we use to train model using the data from physics and dynamics from
-    latent_dynamics.
+    trainer : BayesianGLaSDI
+        trains model using physics to define the FOM, latent_dynamics to define the ROM, and 
+        model to connect them.
 
-    next_step: An enumeration indicating the next step (should we continue training). This should 
-    have been returned by the final call to the step function.
+    next_step : NextStep
+        An enumeration indicating the next step (should we continue training). This should 
+        have been returned by the final call to the step function.
 
-    result: An enumeration indicating the result of the last step of training. This should have
-    have been returned by the final call to the step function.
+    result : Result
+        An enumeration indicating the result of the last step of training. This should have
+        have been returned by the final call to the step function.
 
-    restart_filename: If we loaded from a restart, then this is the name of the restart we loaded.
-    Otherwise, if we did not load from a restart, this should be None.
+    restart_filename : str
+        If we loaded from a restart, then this is the name of the restart we loaded.
+        Otherwise, if we did not load from a restart, this should be None.
 
 
     
